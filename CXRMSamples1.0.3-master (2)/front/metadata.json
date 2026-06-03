@@ -1,0 +1,8 @@
+
+{
+  "name": "AR Glasses Companion",
+  "description": "A companion app for AR glasses featuring device management, gallery, AI assistant, and user profile management.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
