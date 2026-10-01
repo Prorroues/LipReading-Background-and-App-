@@ -17,6 +17,7 @@ from utils.rotate_videos import rotate_video_counterclockwise_sync, rotate_video
 from utils.file_name_extract import file_name_extract
 from utils.edit_distance import pinyin_similarity_score
 from utils import video_tasks
+from utils.latest_recognition import attach_plain_text, get_latest, set_latest
 from middlewares.init_lifespan import tai_middleware
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'Visual_Speech_Recognition_for_Multiple_Languages')))
@@ -102,7 +103,14 @@ async def upload_video(request: Request, file: UploadFile = File(...), direction
         tg.create_task(run_vsr())
         tg.create_task(run_lip_video())
 
+    attach_plain_text(results)
+    set_latest(results)
     return results
+
+
+@app.head("/upload/videos", tags=["上传地址探活（App 测试连接，不处理视频）"])
+async def upload_videos_head():
+    return JSONResponse(status_code=200, content={"status": "ok", "path": "/upload/videos"})
 
 
 @app.post("/upload/videos", tags=["上传要检测的视频(无参数版)"])
@@ -171,7 +179,7 @@ async def upload_videos_simple(
         results = await video_tasks.run_pipeline(
             request, flip_video_path, generate_video_path, generate_image_path, fast=fast
         )
-        return results
+        return attach_plain_text(results)
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -201,6 +209,21 @@ async def upload_videos_status(task_id: str):
         "video": task.get("video", ""),
         "src_age_estimate": task.get("src_age_estimate", ""),
         "src_recognition_results": task.get("src_recognition_results", ""),
+        "plain_text": task.get("plain_text") or task.get("src_recognition_results", ""),
+    }
+
+
+@app.get("/recognition/latest", tags=["获取最近一次唇语纯文本（家居服务拉取）"])
+async def recognition_latest():
+    latest = get_latest()
+    return {
+        "seq": latest.get("seq", 0),
+        "plain_text": latest.get("plain_text", ""),
+        "src_recognition_results": latest.get("src_recognition_results", ""),
+        "src_age_estimate": latest.get("src_age_estimate", ""),
+        "image": latest.get("image", ""),
+        "video": latest.get("video", ""),
+        "updated_at": latest.get("updated_at", 0),
     }
 
 

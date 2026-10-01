@@ -17,13 +17,16 @@ from ..espnet.nets.batch_beam_search import BatchBeamSearch
 from ..espnet.nets.lm_interface import dynamic_import_lm
 from ..espnet.nets.scorers.length_bonus import LengthBonus
 from ..espnet.nets.pytorch_backend.e2e_asr_transformer import E2E
+from .command_decode import pick_command
 
 
 class AVSR(torch.nn.Module):
     def __init__(self, modality, model_path, model_conf, rnnlm=None, rnnlm_conf=None,
-        penalty=0., ctc_weight=0.1, lm_weight=0., beam_size=40, device="cuda:0"):
+        penalty=0., ctc_weight=0.1, lm_weight=0., beam_size=40, device="cuda:0",
+        maxlenratio=-8.0):
         super(AVSR, self).__init__()
         self.device = device
+        self.maxlenratio = maxlenratio
 
         if modality == "audiovisual":
             from ..espnet.nets.pytorch_backend.e2e_asr_transformer_av import E2E
@@ -47,16 +50,26 @@ class AVSR(torch.nn.Module):
         self.model.load_state_dict(torch.load(model_path, map_location=lambda storage, loc: storage))
         self.model.to(device=self.device).eval()
 
-        self.beam_search = get_beam_search_decoder(self.model, self.token_list, rnnlm, rnnlm_conf, penalty, ctc_weight, lm_weight, beam_size)
+        self.beam_search = get_beam_search_decoder(
+            self.model, self.token_list, rnnlm, rnnlm_conf, penalty, ctc_weight, lm_weight, beam_size
+        )
         self.beam_search.to(device=self.device).eval()
-        
+
     def infer(self, data):
         with torch.no_grad():
             if isinstance(data, tuple):
                 enc_feats = self.model.encode(data[0].to(self.device), data[1].to(self.device))
             else:
                 enc_feats = self.model.encode(data.to(self.device))
-            nbest_hyps = self.beam_search(enc_feats)
+            greedy = ""
+            if getattr(self.model, "ctc", None) is not None:
+                command, greedy, _ranked = pick_command(enc_feats, self.model.ctc, self.token_list)
+                if command:
+                    return command
+                return "未匹配到家居指令"
+            nbest_hyps = self.beam_search(enc_feats, maxlenratio=self.maxlenratio)
+            if not nbest_hyps:
+                return greedy
             nbest_hyps = [h.asdict() for h in nbest_hyps[: min(len(nbest_hyps), 1)]]
             transcription = add_results_to_json(nbest_hyps, self.token_list)
             transcription = transcription.replace("▁", " ").strip()
@@ -68,7 +81,7 @@ def get_beam_search_decoder(model, token_list, rnnlm=None, rnnlm_conf=None, pena
     eos = model.odim - 1
     scorers = model.scorers()
 
-    if not rnnlm:
+    if not rnnlm or lm_weight == 0:
         lm = None
     else:
         lm_args = get_model_conf(rnnlm, rnnlm_conf)

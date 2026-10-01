@@ -76,16 +76,43 @@ class MediaCaptureManager private constructor(private val context: Context) {
 
     fun addVideoRecord(note: String? = null, filePath: String? = null): CapturedMedia {
         val finalPath = filePath ?: findLatestVideoFile()
+        return addVideoIfAbsent(finalPath, note)
+    }
+
+    fun addVideoIfAbsent(filePath: String?, note: String? = null): CapturedMedia {
+        val existing = filePath?.takeIf { it.isNotBlank() }?.let { path ->
+            _mediaList.value.firstOrNull { it.filePath == path }
+        }
+        if (existing != null) return existing
         val media = CapturedMedia(
             id = UUID.randomUUID().toString(),
             type = MediaType.VIDEO,
             timestamp = System.currentTimeMillis(),
-            filePath = finalPath,
-            mimeType = finalPath?.let { guessVideoMimeType(it) },
+            filePath = filePath,
+            mimeType = filePath?.let { guessVideoMimeType(it) },
             note = note
         )
         addMedia(media)
         return media
+    }
+
+    fun importVideosFromDisk() {
+        try {
+            val dirs = linkedSetOf(
+                File(syncVideoDir),
+                MediaPathProvider.getRootDir(context)
+            )
+            dirs.forEach { dir ->
+                if (!dir.exists() || !dir.isDirectory) return@forEach
+                dir.walkTopDown().maxDepth(3).forEach { file ->
+                    if (file.isFile && (file.name.endsWith(".mp4", true) || file.name.endsWith(".webm", true))) {
+                        addVideoIfAbsent(file.absolutePath, "磁盘扫描")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "扫描本地视频失败", e)
+        }
     }
 
     private fun addMedia(media: CapturedMedia) {

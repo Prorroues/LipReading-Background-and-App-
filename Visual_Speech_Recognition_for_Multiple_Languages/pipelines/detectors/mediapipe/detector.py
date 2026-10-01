@@ -26,9 +26,10 @@ class LandmarksDetector:
         video_frames = torchvision.io.read_video(filename, pts_unit="sec")[0].numpy()
         frames = [self._prepare_frame(f) for f in video_frames]
 
-        landmarks = self.detect(frames, self.full_range_detector)
+        # 眼镜近距离人脸用 short-range；full-range 会先抓住远处海报/旁人。
+        landmarks = self.detect(frames, self.short_range_detector)
         if all(element is None for element in landmarks):
-            landmarks = self.detect(frames, self.short_range_detector)
+            landmarks = self.detect(frames, self.full_range_detector)
 
         return landmarks
 

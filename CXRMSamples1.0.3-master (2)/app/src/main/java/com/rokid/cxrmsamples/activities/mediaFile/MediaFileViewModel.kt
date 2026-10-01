@@ -2,16 +2,14 @@ package com.rokid.cxrmsamples.activities.mediaFile
 
 import android.util.Log
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.rokid.cxr.client.extend.CxrApi
-import com.rokid.cxr.client.extend.callbacks.SyncStatusCallback
 import com.rokid.cxr.client.extend.callbacks.UnsyncNumResultCallback
-import com.rokid.cxr.client.extend.callbacks.WifiP2PStatusCallback
-import com.rokid.cxr.client.extend.listeners.MediaFilesUpdateListener
 import com.rokid.cxr.client.utils.ValueUtil
-import com.rokid.cxrmsamples.utils.MediaPathProvider
+import com.rokid.cxrmsamples.managers.GlobalWifiManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.File
+import kotlinx.coroutines.launch
 
 enum class ConnectionStatus{
     CONNECTED,
@@ -35,81 +33,44 @@ class MediaFileViewModel: ViewModel() {
     private val _syncing: MutableStateFlow<Boolean> = MutableStateFlow(false)
     val syncing = _syncing.asStateFlow()
 
-    private val wifiP2PStatusCallback = object : WifiP2PStatusCallback {
-
-        override fun onConnected() {
-            _connected.value = ConnectionStatus.CONNECTED
-        }
-
-        override fun onDisconnected() {
-            _connected.value = ConnectionStatus.DISCONNECTED
-        }
-
-        override fun onFailed(p0: ValueUtil.CxrWifiErrorCode?) {
-            _connected.value = ConnectionStatus.DISCONNECTED
-        }
-    }
-
-    private val mediaFilesUpdateListener = MediaFilesUpdateListener { getUnsyncNum() }
-
-    fun setMediaFilesUpdateListener(){
-        CxrApi.getInstance().setMediaFilesUpdateListener(mediaFilesUpdateListener)
-    }
-
-    private val unsyncNumResultCallback =
-        UnsyncNumResultCallback { status, audioNum, pictureNum, videoNum ->
-            if (status == ValueUtil.CxrStatus.RESPONSE_SUCCEED){
-                _audioNumber.value = audioNum
-                _pictureNumber.value = pictureNum
-                _videoNumber.value = videoNum
+    init {
+        viewModelScope.launch {
+            GlobalWifiManager.getInstance().wifiStatus.collect { status ->
+                _connected.value = when (status) {
+                    GlobalWifiManager.WifiStatus.CONNECTED -> ConnectionStatus.CONNECTED
+                    GlobalWifiManager.WifiStatus.CONNECTING -> ConnectionStatus.CONNECTING
+                    GlobalWifiManager.WifiStatus.DISCONNECTED -> ConnectionStatus.DISCONNECTED
+                }
             }
         }
-
-    private val syncStatus = object : SyncStatusCallback{
-        override fun onSyncStart() {
-            // Todo when sync start
-        }
-
-        override fun onSingleFileSynced(p0: String?) {
-            // Todo when sync single file
-            Log.i(TAG, "sync single file, name = $p0")
-        }
-
-        override fun onSyncFailed() {
-            _syncing.value = false
-            Log.e(TAG, "sync failed")
-        }
-
-        override fun onSyncFinished() {
-            _syncing.value = false
-            Log.i(TAG, "sync finished")
-        }
-
     }
 
     fun connect(){
-        _connected.value = ConnectionStatus.CONNECTING
-        CxrApi.getInstance().initWifiP2P(wifiP2PStatusCallback)
+        GlobalWifiManager.getInstance().connectWifi()
     }
 
-
     fun disconnect(){
-        CxrApi.getInstance().deinitWifiP2P()
-        _connected.value = ConnectionStatus.DISCONNECTED
+        Log.w(TAG, "忽略断开请求，避免拆掉全局眼镜直连")
+    }
+
+    fun setMediaFilesUpdateListener(){
+        Log.d(TAG, "媒体更新监听由 GlobalWifiManager 统一持有")
     }
 
     fun getUnsyncNum(){
-        CxrApi.getInstance().getUnsyncNum(unsyncNumResultCallback)
+        CxrApi.getInstance().getUnsyncNum(
+            UnsyncNumResultCallback { status, audioNum, pictureNum, videoNum ->
+                if (status == ValueUtil.CxrStatus.RESPONSE_SUCCEED){
+                    _audioNumber.value = audioNum
+                    _pictureNumber.value = pictureNum
+                    _videoNumber.value = videoNum
+                }
+            }
+        )
     }
 
     fun startSync(mediaType: Array<ValueUtil.CxrMediaType>){
-
-        val file = File(MediaPathProvider.getRootPath())
-        if (!file.exists()){
-            file.mkdirs()
-        }
-
-        CxrApi.getInstance().startSync(MediaPathProvider.getRootPath(), mediaType, syncStatus)
+        GlobalWifiManager.getInstance().requestImmediateVideoSync("media_file_page")
         _syncing.value = true
     }
 
@@ -117,5 +78,4 @@ class MediaFileViewModel: ViewModel() {
         CxrApi.getInstance().stopSync()
         _syncing.value = false
     }
-
 }

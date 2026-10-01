@@ -224,11 +224,11 @@ class GlobalVoiceRecognitionManager private constructor() {
                 // 开始录音
                 recordName = "voice_${System.currentTimeMillis()}.pcm"
                 audioListener = object : AudioStreamListener {
-                    override fun onStartAudioStream(codeType: Int, streamType: String?) {
-                        Log.d(TAG, "音频流已启动")
+                    override fun onStartAudioStream(streamId: Int, codec: Int, mode: Int, cmd: String?) {
+                        Log.d(TAG, "音频流已启动 streamId=$streamId")
                     }
                     
-                    override fun onAudioStream(data: ByteArray?, offset: Int, size: Int) {
+                    override fun onAudioStream(streamId: Int, data: ByteArray?, offset: Int, size: Int) {
                         // 保存音频数据
                         val file = File(recordPath, recordName)
                         val parent = file.parentFile
@@ -256,10 +256,13 @@ class GlobalVoiceRecognitionManager private constructor() {
                             }
                         }
                     }
+                    override fun onAudioStreamFinish(streamId: Int) {
+                        Log.d(TAG, "音频流结束 streamId=$streamId")
+                    }
                 }
                 
                 CxrApi.getInstance().setAudioStreamListener(audioListener)
-                CxrApi.getInstance().openAudioRecord(1, "voice_recognition")
+                CxrApi.getInstance().openAudioRecord(1, 0, "voice_recognition")
                 Log.d(TAG, "音频录制已启动")
                 
             } catch (e: Exception) {

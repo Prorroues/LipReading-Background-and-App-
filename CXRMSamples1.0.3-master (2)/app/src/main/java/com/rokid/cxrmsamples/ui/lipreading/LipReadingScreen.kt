@@ -56,11 +56,18 @@ fun LipReadingScreen(viewModel: VideoUploadViewModel = viewModel(), onBack: () -
     var extractFieldInput by remember { mutableStateOf(resultExtractField) }
     var dialog by remember { mutableStateOf(0) }
 
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        viewModel.connectWifiP2P(force = false)
+    }
     DisposableEffect(Unit) { viewModel.setSceneStatusListener(true); onDispose { viewModel.setSceneStatusListener(false) } }
     LaunchedEffect(Unit) {
         viewModel.loadUploadUrl(context)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+        val perms = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            perms.add(Manifest.permission.READ_MEDIA_VIDEO)
+        }
+        permissionLauncher.launch(perms.toTypedArray())
     }
 
     Column(modifier.fillMaxSize().padding(16.dp)) {
@@ -106,7 +113,8 @@ fun LipReadingScreen(viewModel: VideoUploadViewModel = viewModel(), onBack: () -
 
             Column(Modifier.fillMaxWidth().padding(top = 24.dp)) {
                 Text("录制状态: ${if (isRecording) "录制中" else "未录制"}", modifier = Modifier.padding(vertical = 4.dp))
-                Text("Wi-Fi状态: ${when (wifiConnectionStatus) { ConnectionStatus.CONNECTED -> "已连接"; ConnectionStatus.CONNECTING -> "连接中"; ConnectionStatus.DISCONNECTED -> "未连接" }}", modifier = Modifier.padding(vertical = 4.dp))
+                Text("Wi-Fi状态: ${when (wifiConnectionStatus) { ConnectionStatus.CONNECTED -> "眼镜直连已连接（录像可以拷到手机）"; ConnectionStatus.CONNECTING -> "眼镜直连连接中"; ConnectionStatus.DISCONNECTED -> "眼镜直连未连接。手机有网只能上传，录像还在眼镜上" }}", modifier = Modifier.padding(vertical = 4.dp))
+                Button(onClick = { viewModel.connectWifiP2P(force = true) }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) { Text("立即连接眼镜直连") }
                 Text("上传状态: ${when (uploadStatus) { UploadStatus.IDLE -> "空闲"; UploadStatus.UPLOADING -> "上传中"; UploadStatus.WAITING_RESPONSE -> "上传成功，等待响应"; UploadStatus.SUCCESS -> "成功"; UploadStatus.FAILED -> "失败" }}", modifier = Modifier.padding(vertical = 4.dp))
                 Text("自动上传视频: ${if (isAutoUploadEnabled) "是" else "否"}", modifier = Modifier.padding(vertical = 4.dp))
                 currentUploadingFile?.let { Text("当前文件: $it", modifier = Modifier.padding(vertical = 4.dp)) }
@@ -128,15 +136,30 @@ fun LipReadingScreen(viewModel: VideoUploadViewModel = viewModel(), onBack: () -
                 Text("视频预览")
                 if (lastUploadedVideoPath.isNullOrEmpty() && lastUploadedVideoUrl.isNullOrEmpty()) Box(Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) { Text("暂无已上传视频") }
                 else {
-                    AndroidView(modifier = Modifier.fillMaxWidth().height(200.dp), factory = { ctx -> VideoView(ctx).apply { layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT); val c = MediaController(ctx); c.setAnchorView(this); setMediaController(c); setOnPreparedListener { }; setOnErrorListener { _, _, _ -> true } } }, update = { view ->
+                    AndroidView(modifier = Modifier.fillMaxWidth().height(200.dp), factory = { ctx ->
+                        VideoView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                            val c = MediaController(ctx)
+                            c.setAnchorView(this)
+                            setMediaController(c)
+                            setOnErrorListener { _, _, _ -> true }
+                        }
+                    }, update = { view ->
                         val src = when {
-                            !lastUploadedVideoPath.isNullOrEmpty() -> lastUploadedVideoPath?.let { if (File(it).exists()) it else lastUploadedVideoUrl }
+                            lastUploadedVideoPath?.let { File(it).exists() } == true -> lastUploadedVideoPath
                             !lastUploadedVideoUrl.isNullOrEmpty() -> lastUploadedVideoUrl
                             else -> null
                         }
-                        src?.let { try { view.setVideoURI(Uri.parse(it)); view.requestFocus() } catch (_: Exception) {} }
+                        if (src != null && view.tag != src) {
+                            view.tag = src
+                            try {
+                                if (src.startsWith("http")) view.setVideoURI(Uri.parse(src))
+                                else view.setVideoPath(src)
+                            } catch (_: Exception) {
+                            }
+                        }
                     })
-                    Text(when { lastUploadedVideoPath?.let { File(it).exists() } == true -> "本地视频（点击播放器控制条播放）"; !lastUploadedVideoUrl.isNullOrEmpty() -> "服务器视频（点击播放器控制条播放）"; else -> "加载中..." }, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                    Text(when { lastUploadedVideoPath?.let { File(it).exists() } == true -> "本地视频（点播放器控制条播放，不要反复点）"; !lastUploadedVideoUrl.isNullOrEmpty() -> "服务器视频（点击播放器控制条播放）"; else -> "加载中..." }, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
                 }
             }
 

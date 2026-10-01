@@ -59,7 +59,7 @@ class AudioUsageViewModel: ViewModel() {
     private val recordPath = MediaPathProvider.getRootPath()
 
     private val audioListener = object : AudioStreamListener{
-        override fun onStartAudioStream(codeType: Int, streamType: String?) {
+        override fun onStartAudioStream(streamId: Int, codec: Int, mode: Int, cmd: String?) {
             // create a new file to record audio
             recordName = "cxrM_${ System.currentTimeMillis() }.pcm"
             _listRecordName.value += recordName
@@ -67,7 +67,7 @@ class AudioUsageViewModel: ViewModel() {
         }
 
         @SuppressLint("SdCardPath")
-        override fun onAudioStream(data: ByteArray?, offset: Int, size: Int) {
+        override fun onAudioStream(streamId: Int, data: ByteArray?, offset: Int, size: Int) {
             // audio data--存储到应用内
             val file = File(recordPath, recordName)
             val parent = file.parentFile
@@ -85,6 +85,10 @@ class AudioUsageViewModel: ViewModel() {
             }
             fos.close()
         }
+
+        override fun onAudioStreamFinish(streamId: Int) {
+            Log.i(TAG, "onAudioStreamFinish: $streamId")
+        }
     }
 
 
@@ -92,7 +96,7 @@ class AudioUsageViewModel: ViewModel() {
     fun startAudioStream(){
         _recording.value = true
         CxrApi.getInstance().setAudioStreamListener(audioListener)
-        CxrApi.getInstance().openAudioRecord(1, "audio_stream")
+        CxrApi.getInstance().openAudioRecord(1, 0, "audio_stream")
     }
 
     fun stopAudioStream(){

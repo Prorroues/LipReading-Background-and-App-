@@ -27,6 +27,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _wifiStatus = MutableStateFlow(false)
     val wifiStatus: StateFlow<Boolean> = _wifiStatus.asStateFlow()
 
+    val wifiPhase = wifiManager.wifiStatus
+    val wifiHint = wifiManager.statusMessage
+
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
@@ -89,11 +92,19 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _isWifiEnabled.value = enabled
     }
 
+    fun connectWifiNow() {
+        if (!wifiManager.isWifiEnabled.value) {
+            wifiManager.setWifiEnabled(true)
+            return
+        }
+        wifiManager.connectWifi(force = true)
+    }
+
     fun toggleRecording() {
         _isRecording.value = !_isRecording.value
         if (_isRecording.value) {
             try {
-                CxrApi.getInstance().openAudioRecord(1, "home_recording")
+                CxrApi.getInstance().openAudioRecord(1, 0, "home_recording")
             } catch (e: Exception) {
                 _isRecording.value = false
             }

@@ -9,4 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
     private val mediaManager = MediaCaptureManager.getInstance(application)
     val mediaList: StateFlow<List<CapturedMedia>> = mediaManager.mediaList
+
+    init {
+        mediaManager.importVideosFromDisk()
+    }
 }

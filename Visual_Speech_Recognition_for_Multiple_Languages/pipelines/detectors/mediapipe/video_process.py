@@ -32,21 +32,32 @@ def apply_transform(transform, img, std_size):
     return warped
 
 
+def _shift_into_bounds(lo, hi, limit):
+    if lo < 0:
+        hi -= lo
+        lo = 0
+    if hi > limit:
+        lo -= hi - limit
+        hi = limit
+    lo = int(np.clip(lo, 0, limit))
+    hi = int(np.clip(hi, 0, limit))
+    return lo, hi
+
+
 def cut_patch(img, landmarks, height, width, threshold=5):
     center_x, center_y = np.mean(landmarks, axis=0)
-    # Check for too much bias in height and width
-    if abs(center_y - img.shape[0] / 2) > height + threshold:
-        raise Exception('too much bias in height')
-    if abs(center_x - img.shape[1] / 2) > width + threshold:
-        raise Exception('too much bias in width')
-    # Calculate bounding box coordinates
-    y_min = int(round(np.clip(center_y - height, 0, img.shape[0])))
-    y_max = int(round(np.clip(center_y + height, 0, img.shape[0])))
-    x_min = int(round(np.clip(center_x - width, 0, img.shape[1])))
-    x_max = int(round(np.clip(center_x + width, 0, img.shape[1])))
-    # Cut the image
-    cutted_img = np.copy(img[y_min:y_max, x_min:x_max])
-    return cutted_img
+    h, w = img.shape[:2]
+    # CMLR 原阈值是给正脸新闻视频的。眼镜俯拍时嘴部对齐后会偏离画布中心，
+    # 直接抛 too much bias 会整段失败。这里改成把裁窗平移回画面内。
+    y_min = int(round(center_y - height))
+    y_max = int(round(center_y + height))
+    x_min = int(round(center_x - width))
+    x_max = int(round(center_x + width))
+    y_min, y_max = _shift_into_bounds(y_min, y_max, h)
+    x_min, x_max = _shift_into_bounds(x_min, x_max, w)
+    if y_max - y_min < 8 or x_max - x_min < 8:
+        raise Exception('invalid mouth crop')
+    return np.copy(img[y_min:y_max, x_min:x_max])
 
 
 class VideoProcess:
@@ -68,7 +79,6 @@ class VideoProcess:
             return
         # Affine transformation and crop patch
         sequence = self.crop_patch(video, preprocessed_landmarks)
-        assert sequence is not None, f"cannot crop a patch from {filename}."
         return sequence
 
 
@@ -79,8 +89,22 @@ class VideoProcess:
             smoothed_landmarks = np.mean([landmarks[x] for x in range(frame_idx - window_margin, frame_idx + window_margin + 1)], axis=0)
             smoothed_landmarks += landmarks[frame_idx].mean(axis=0) - smoothed_landmarks.mean(axis=0)
             transformed_frame, transformed_landmarks = self.affine_transform(frame,smoothed_landmarks,self.reference,grayscale=self.convert_gray)
-            patch = cut_patch(transformed_frame, transformed_landmarks[self.start_idx:self.stop_idx], self.crop_height//2, self.crop_width//2,)
+            try:
+                patch = cut_patch(
+                    transformed_frame,
+                    transformed_landmarks[self.start_idx:self.stop_idx],
+                    self.crop_height // 2,
+                    self.crop_width // 2,
+                )
+            except Exception:
+                continue
+            if patch.size == 0:
+                continue
+            if patch.shape[0] != self.crop_height or patch.shape[1] != self.crop_width:
+                patch = cv2.resize(patch, (self.crop_width, self.crop_height), interpolation=cv2.INTER_LINEAR)
             sequence.append(patch)
+        if len(sequence) < 5:
+            return None
         return np.array(sequence)
 
 

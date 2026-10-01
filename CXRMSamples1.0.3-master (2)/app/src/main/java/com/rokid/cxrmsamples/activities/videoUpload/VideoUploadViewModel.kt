@@ -33,20 +33,18 @@ import com.rokid.cxrmsamples.network.NetworkModule
 import com.rokid.cxrmsamples.network.VideoUploadApi
 import com.rokid.cxrmsamples.network.VideoUploadCoordinator
 import com.rokid.cxrmsamples.utils.AliyunTokenHelper
+import com.rokid.cxrmsamples.utils.GalleryPublisher
 import com.rokid.cxrmsamples.utils.MediaPathProvider
+import com.rokid.cxrmsamples.utils.SyncedVideoFinder
 import com.rokid.cxrmsamples.utils.UploadUrlHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -79,7 +77,6 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
     private val TAG = "VideoUploadViewModel"
     private val appContext: Context = application.applicationContext
     private val autoUploadMaxAttempts = 3
-    private val autoUploadFindFileRetries = 15
 
     // 视频分辨率选项
     val videoSize: Array<Size> = arrayOf(
@@ -201,8 +198,11 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
     private val sceneStatusUpdateListener = SceneStatusUpdateListener { sceneStatus ->
         sceneStatus?.isVideoRecordRunning?.let { isRunning ->
             if (!isRunning && _isRecording.value) {
-                Log.d(TAG, "Video recording stopped")
-                handleRecordingStoppedAndAutoUpload("scene_listener")
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    if (!_isRecording.value) return@launch
+                    Log.d(TAG, "Video recording stopped")
+                    handleRecordingStoppedAndAutoUpload("scene_listener")
+                }
             }
         }
     }
@@ -283,6 +283,10 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
             Log.d(TAG, "Wi-Fi P2P disconnected")
             _wifiConnectionStatus.value = ConnectionStatus.DISCONNECTED
             _serverResponseMessage.value = "WiFi已断开"
+        }
+
+        override fun onP2pDeviceAvailable(name: String?, address: String?, info: String?) {
+            Log.d(TAG, "Wi-Fi P2P device available: $name $address")
         }
 
         override fun onFailed(errorCode: ValueUtil.CxrWifiErrorCode?) {
@@ -444,15 +448,32 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    private fun isGlassesP2pConnected(): Boolean {
+        return try {
+            GlobalWifiManager.getInstance().wifiStatus.value == GlobalWifiManager.WifiStatus.CONNECTED
+        } catch (_: Exception) {
+            _wifiConnectionStatus.value == ConnectionStatus.CONNECTED
+        }
+    }
+
     private fun hasAvailableUploadConnection(): Boolean {
-        return _wifiConnectionStatus.value == ConnectionStatus.CONNECTED || checkNetworkConnection()
+        // 公网穿透上传走手机上网；眼镜直连只负责把录像拷到手机。
+        return checkNetworkConnection() || isGlassesP2pConnected()
     }
 
     private fun refreshEffectiveConnectionStatus() {
-        _wifiConnectionStatus.value = when {
-            _wifiConnectionStatus.value == ConnectionStatus.CONNECTING -> ConnectionStatus.CONNECTING
-            hasAvailableUploadConnection() -> ConnectionStatus.CONNECTED
-            else -> ConnectionStatus.DISCONNECTED
+        // 不要用「手机已上网」把眼镜直连状态刷成已连接，否则界面显示直连已通，实际文件还在眼镜上。
+        val p2p = try {
+            GlobalWifiManager.getInstance().wifiStatus.value
+        } catch (_: Exception) {
+            null
+        }
+        if (p2p != null) {
+            _wifiConnectionStatus.value = when (p2p) {
+                GlobalWifiManager.WifiStatus.CONNECTED -> ConnectionStatus.CONNECTED
+                GlobalWifiManager.WifiStatus.CONNECTING -> ConnectionStatus.CONNECTING
+                GlobalWifiManager.WifiStatus.DISCONNECTED -> ConnectionStatus.DISCONNECTED
+            }
         }
     }
 
@@ -506,9 +527,15 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
 
     fun toggleRecording() {
         if (_isRecording.value) {
-            // 停止录制
-            openOrCloseVideoRecord(false)
+            // 先改按钮状态，不要等眼镜 controlScene 回包，否则会卡 1～2 秒
             handleRecordingStoppedAndAutoUpload("manual_stop")
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    openOrCloseVideoRecord(false)
+                } catch (e: Exception) {
+                    Log.e(TAG, "停止录像失败", e)
+                }
+            }
         } else {
             viewModelScope.launch {
                 val error = checkServerReady()
@@ -522,9 +549,11 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
                 _isRecording.value = true
                 recordStartAtMs = System.currentTimeMillis()
                 _uploadStatus.value = UploadStatus.IDLE
-                // WiFi连接在后台异步进行，不阻塞录制
-                delay(500) // 稍微延迟，确保录制已启动
-                autoConnectWifiP2P()
+                try {
+                    GlobalWifiManager.getInstance().prepareForRecording()
+                } catch (e: Exception) {
+                    Log.w(TAG, "预热 WiFi 失败", e)
+                }
             }
         }
     }
@@ -540,8 +569,8 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
     /**
      * 手动连接 WiFi P2P（委托给全局管理器）
      */
-    fun connectWifiP2P() {
-        GlobalWifiManager.getInstance().connectWifi()
+    fun connectWifiP2P(force: Boolean = false) {
+        GlobalWifiManager.getInstance().connectWifi(force = force)
     }
 
     /**
@@ -552,9 +581,12 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun autoConnectWifiP2P() {
-        if (_wifiConnectionStatus.value == ConnectionStatus.DISCONNECTED) {
-            safeInitWifiP2P("Auto")
-        }
+        GlobalWifiManager.getInstance().connectWifi()
+    }
+
+    private fun safeInitWifiP2P(caller: String) {
+        Log.d(TAG, "$caller: 交给全局 WiFi 管理器连接，避免抢回调")
+        GlobalWifiManager.getInstance().connectWifi()
     }
 
     private fun handleRecordingStoppedAndAutoUpload(source: String) {
@@ -566,22 +598,28 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
         }
         val now = System.currentTimeMillis()
         // 防止手动停止和场景回调重复触发自动上传
-        if (now - lastAutoUploadTriggerAtMs < 1500) {
+        if (now - lastAutoUploadTriggerAtMs < 800) {
             return
         }
         lastAutoUploadTriggerAtMs = now
         autoUploadSessionActive = true
         currentAutoUploadPath = null
+        try {
+            GlobalWifiManager.getInstance().requestImmediateVideoSync("recording_stopped")
+        } catch (e: Exception) {
+            Log.w(TAG, "请求立即同步失败", e)
+        }
         // 新一次录像结束，清掉上一轮 SUCCESS，避免误判「已上传完成」
         _uploadStatus.value = UploadStatus.IDLE
         _serverResponseMessage.value = "录像已结束，准备自动上传..."
         if (!isProgressPlaceholder(_lipReadingResult.value) && _uploadStatus.value == UploadStatus.SUCCESS) {
             // 保留上一轮识别结果文案
         } else {
-            _lipReadingResult.value = "准备上传..."
+            _lipReadingResult.value = "正在从眼镜同步视频，请稍候…"
+            _serverResponseMessage.value = "录像已结束，正在拉取（如有积压会先传完旧视频）"
         }
         autoUploadJob?.cancel()
-        autoUploadJob = viewModelScope.launch {
+        autoUploadJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 triggerAutoUploadAfterRecording(source)
             } finally {
@@ -594,15 +632,29 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
     private suspend fun triggerAutoUploadAfterRecording(source: String) {
         Log.d(TAG, "录制结束自动上传触发: $source")
 
-        if (_wifiConnectionStatus.value == ConnectionStatus.DISCONNECTED) {
+        if (!isGlassesP2pConnected()) {
+            _serverResponseMessage.value = "正在连接眼镜直连，才能把录像拷到手机…"
             autoConnectWifiP2P()
+            var waited = 0
+            while (!isGlassesP2pConnected() && waited < 80) {
+                delay(250)
+                waited++
+            }
         }
 
-        var waitCount = 0
-        while (_wifiConnectionStatus.value == ConnectionStatus.CONNECTING && waitCount < 20) {
-            delay(500)
-            waitCount++
+        val latestVideo = findLatestVideoForAutoUploadWithRetry()
+        if (latestVideo == null) {
+            val p2pOn = isGlassesP2pConnected()
+            _uploadStatus.value = UploadStatus.FAILED
+            _lipReadingResult.value = "上传失败：未找到录制视频"
+            _serverResponseMessage.value = if (p2pOn) {
+                "眼镜直连已通，但文件还没拷到手机。请看首页是否仍在传积压，或再录一次较短视频"
+            } else {
+                "手机有网只能把视频传到服务器；录像还在眼镜上。请回首页点「立即连接」，等到眼镜直连已接通后再录"
+            }
+            return
         }
+        GalleryPublisher.publishVideo(appContext, latestVideo)
 
         refreshEffectiveConnectionStatus()
         if (!hasAvailableUploadConnection()) {
@@ -612,43 +664,20 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        val latestVideo = findLatestVideoForAutoUploadWithRetry()
-        if (latestVideo == null) {
-            _uploadStatus.value = UploadStatus.FAILED
-            _lipReadingResult.value = "上传失败：未找到录制视频"
-            _serverResponseMessage.value = "自动上传失败：未找到可上传视频"
-            return
-        }
-
-        _lastUploadedVideoPath.value = latestVideo.absolutePath
         currentAutoUploadPath = latestVideo.absolutePath
         autoUploadFileWithRetry(latestVideo)
     }
 
     private suspend fun findLatestVideoForAutoUploadWithRetry(): File? {
-        findLatestVideoForAutoUpload()?.let { return it }
-        _serverResponseMessage.value = "等待视频同步到手机..."
-        try {
-            val path = withTimeout(12_000) {
-                GlobalVideoSyncQueue.latestVideo
-                    .filter { p ->
-                        if (p.isNullOrBlank()) return@filter false
-                        val f = File(p)
-                        f.exists() && isVideoFileName(f.name) &&
-                            (recordStartAtMs <= 0L || f.lastModified() >= recordStartAtMs - 3_000L)
-                    }
-                    .first()
-            }
-            if (!path.isNullOrBlank()) return File(path)
-        } catch (_: TimeoutCancellationException) {
-            Log.d(TAG, "同步队列等待超时，改用目录轮询")
+        _serverResponseMessage.value = "正在同步视频到手机…"
+        return SyncedVideoFinder.waitForLatestVideo(
+            context = appContext,
+            recordedAfterMs = recordStartAtMs,
+            extraDir = _localMediaPath.value,
+            excludePaths = synchronized(uploadedFileKeys) { uploadedFileKeys.toList() }
+        ) { msg ->
+            _serverResponseMessage.value = msg
         }
-        repeat(autoUploadFindFileRetries) { attempt ->
-            _serverResponseMessage.value = "查找视频 (${attempt + 1}/$autoUploadFindFileRetries)..."
-            findLatestVideoForAutoUpload()?.let { return it }
-            if (attempt < autoUploadFindFileRetries - 1) delay(300)
-        }
-        return null
     }
 
     private suspend fun autoUploadFileWithRetry(file: File) {
@@ -760,6 +789,8 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
         return text == null ||
             text == "上传中..." ||
             text == "准备上传..." ||
+            text == "正在从眼镜同步视频，请稍候…" ||
+            text.startsWith("正在从眼镜拉取") ||
             text.startsWith("上传失败，正在重试")
     }
 
@@ -829,37 +860,6 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
             lowerFileName.endsWith(".webm")
     }
 
-    /**
-     * 安全地初始化WiFi P2P，添加异常处理和状态检查
-     */
-    private fun safeInitWifiP2P(caller: String) {
-        try {
-            // 检查蓝牙是否已连接
-            if (!CxrApi.getInstance().isBluetoothConnected) {
-                Log.w(TAG, "$caller: Bluetooth not connected, cannot init WiFi P2P")
-                _serverResponseMessage.value = "蓝牙未连接，无法连接WiFi"
-                return
-            }
-
-            if (_wifiConnectionStatus.value == ConnectionStatus.DISCONNECTED) {
-                Log.d(TAG, "$caller: Connecting Wi-Fi P2P...")
-                _wifiConnectionStatus.value = ConnectionStatus.CONNECTING
-                CxrApi.getInstance().initWifiP2P(wifiP2PStatusCallback)
-            } else {
-                Log.d(TAG, "$caller: WiFi already in state: ${_wifiConnectionStatus.value}")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "$caller: Error initializing WiFi P2P", e)
-            _wifiConnectionStatus.value = ConnectionStatus.DISCONNECTED
-            _serverResponseMessage.value = "WiFi连接失败: ${e.message}"
-        }
-    }
-
-
-    /**
-     * 手动检查并上传视频（已禁用自动检查）
-     * 此方法保留用于手动触发上传
-     */
     fun checkAndUploadVideos() {
         viewModelScope.launch {
             val error = checkServerReady()
@@ -1162,11 +1162,13 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
                                 } else {
                                     syncResultTextAfterUploadSuccess()
                                 }
-                                
-                                // 自动触发语音合成并播放
+
                                 if (extractedResult.isNotBlank()) {
-                                    Log.d(TAG, "收到识别结果，自动触发语音合成: $extractedResult")
-                                    synthesizeAndPlay(extractedResult, autoPlay = true)
+                                    Log.d(TAG, "收到识别结果，稍后合成语音: $extractedResult")
+                                    viewModelScope.launch {
+                                        delay(800)
+                                        synthesizeAndPlay(extractedResult, autoPlay = true)
+                                    }
                                 }
                             } catch (e: Exception) {
                                 Log.e(TAG, "解析服务器返回失败: $responseMessage", e)
@@ -1187,15 +1189,6 @@ class VideoUploadViewModel(application: Application) : AndroidViewModel(applicat
                                 }
                             }
 
-                            // 上传成功后延迟删除本地文件（保留用于预览）
-                            viewModelScope.launch {
-                                delay(5000) // 延迟5秒删除，给预览留时间
-                                if (file.exists() && file.delete()) {
-                                    Log.d(TAG, "本地文件已删除: $fileName")
-                                } else {
-                                    Log.w(TAG, "删除本地文件失败或文件不存在: $fileName")
-                                }
-                            }
                         } else {
                             lastError = "识别超时或失败"
                             Log.e(TAG, "识别失败: $fileName")

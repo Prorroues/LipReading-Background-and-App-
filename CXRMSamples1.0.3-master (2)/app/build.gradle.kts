@@ -102,7 +102,7 @@ dependencies {
     implementation ("com.google.code.gson:gson:2.10.1")
     implementation ("com.squareup.okhttp3:logging-interceptor:4.9.1")
 
-    implementation("com.rokid.cxr:client-m:1.0.3") {
+    implementation("com.rokid.cxr:client-m:1.1.0") {
         exclude(group = "com.rokid.cxr", module = "client-m-sources")
     }
 

@@ -20,15 +20,15 @@ import com.rokid.cxrmsamples.network.VideoUploadApi
 import com.rokid.cxrmsamples.network.VideoUploadCoordinator
 import com.rokid.cxrmsamples.services.assistant.VoiceAssistantManager
 import com.rokid.cxrmsamples.utils.AliyunTokenHelper
+import com.rokid.cxrmsamples.utils.GalleryPublisher
 import com.rokid.cxrmsamples.utils.MediaPathProvider
+import com.rokid.cxrmsamples.utils.SyncedVideoFinder
 import com.rokid.cxrmsamples.managers.ErrorReporter
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.first
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -182,6 +182,11 @@ class GlobalVideoUploadManager private constructor(private val context: Context)
         // 开始录像
         CxrApi.getInstance().controlScene(ValueUtil.CxrSceneType.VIDEO_RECORD, true, null)
         _isRecording.value = true
+        try {
+            GlobalWifiManager.getInstance().prepareForRecording()
+        } catch (e: Exception) {
+            Log.w(TAG, "预热 WiFi 失败", e)
+        }
 
         // 兜底：按时长结束后触发后续流程
         recordEndJob?.cancel()
@@ -203,8 +208,11 @@ class GlobalVideoUploadManager private constructor(private val context: Context)
         _isRecording.value = false
         lastRecordingFinishedAt = System.currentTimeMillis()
         emitStatus("录像完成，等待同步...", "#FFC107")
-        
-        // 不再主动同步，改为监听全局同步队列
+        try {
+            GlobalWifiManager.getInstance().requestImmediateVideoSync("global_record_end")
+        } catch (e: Exception) {
+            Log.w(TAG, "请求立即同步失败", e)
+        }
         scope.launch {
             waitForVideoInQueue()
         }
@@ -217,97 +225,25 @@ class GlobalVideoUploadManager private constructor(private val context: Context)
     private suspend fun waitForVideoInQueue() {
         try {
             emitStatus("等待视频同步...", "#FFC107", toChat = false)
-            
-            // 方案1：先尝试通过Flow监听队列更新（超时5秒）
-            var videoPath: String? = null
-            try {
-                videoPath = withTimeout(5000) {
-                    // 监听队列更新，等待第一个符合条件的视频
-                    GlobalVideoSyncQueue.latestVideo
-                        .filter { it != null }
-                        .filter { path ->
-                            // 检查是否是录制后的视频（通过文件修改时间）
-                            try {
-                                val file = File(path ?: return@filter false)
-                                if (file.exists() && file.lastModified() >= lastRecordingFinishedAt - 2000) {
-                                    // 检查是否已上传
-                                    val fileName = file.name
-                                    synchronized(uploadedFiles) {
-                                        !uploadedFiles.contains(fileName)
-                                    }
-                                } else {
-                                    false
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "检查文件时间失败", e)
-                                false
-                            }
-                        }
-                        .take(1)
-                        .first()
-                }
-            } catch (e: TimeoutCancellationException) {
-                Log.d(TAG, "Flow监听超时，使用轮询方式")
-            } catch (e: NoSuchElementException) {
-                Log.d(TAG, "Flow未找到符合条件的视频，使用轮询方式")
-            }
-            
-            // 方案2：如果Flow超时，使用轮询方式（最多10秒）
-            if (videoPath == null) {
-                val maxWaitTime = 10000L // 最多等待10秒
-                val pollInterval = 500L // 每0.5秒检查一次
-                val startTime = System.currentTimeMillis()
-                var found = false
-                
-                while (!found && System.currentTimeMillis() - startTime < maxWaitTime) {
-                    // 从队列获取最新视频
-                    val candidatePath = GlobalVideoSyncQueue.getLatestVideoAfter(lastRecordingFinishedAt - 2000)
-                    
-                    if (candidatePath != null) {
-                        // 检查是否已上传
-                        val fileName = File(candidatePath).name
-                        val notUploaded = synchronized(uploadedFiles) {
-                            !uploadedFiles.contains(fileName)
-                        }
-                        
-                        if (notUploaded) {
-                            Log.d(TAG, "从队列获取到视频: $candidatePath")
-                            videoPath = candidatePath
-                            found = true
-                        }
-                    }
-                    
-                    if (!found) {
-                        delay(pollInterval)
-                    }
-                }
+            val recordedAfter = if (lastRecordingFinishedAt > 0L) lastRecordingFinishedAt - 15_000L else 0L
+            val videoFile = SyncedVideoFinder.waitForLatestVideo(
+                context = context,
+                recordedAfterMs = recordedAfter,
+                extraDir = syncPath
+            ) { msg ->
+                emitStatus(msg, "#FFC107", toChat = false)
             }
 
-            // 方案3：最后使用队列中最新的视频（不校验时间），确保优先取最新路径
-            if (videoPath == null) {
-                val latestPath = GlobalVideoSyncQueue.getLatestVideo()
-                if (latestPath != null) {
-                    val fileName = File(latestPath).name
-                    val notUploaded = synchronized(uploadedFiles) {
-                        !uploadedFiles.contains(fileName)
-                    }
-                    if (notUploaded) {
-                        Log.d(TAG, "使用队列最新视频: $latestPath")
-                        videoPath = latestPath
-                    }
-                }
-            }
-            
-            if (videoPath != null && File(videoPath).exists()) {
-                Log.d(TAG, "找到视频，开始上传: $videoPath")
-                // 使用完整路径上传
-                uploadVideoFileByPath(videoPath)
+            if (videoFile != null && videoFile.exists()) {
+                Log.d(TAG, "找到视频，开始上传: ${videoFile.absolutePath}")
+                GalleryPublisher.publishVideo(context, videoFile)
+                uploadVideoFileByPath(videoFile.absolutePath)
             } else {
-                Log.e(TAG, "未在队列中找到视频（超时）")
+                Log.e(TAG, "未找到同步视频（超时）")
                 ErrorReporter.report(
                     source = TAG,
                     stage = "waitForVideoInQueue",
-                    message = "未在队列中找到视频（超时）",
+                    message = "未找到同步视频（超时）",
                     detail = "queueSize=${GlobalVideoSyncQueue.size()}, lastRecordAt=$lastRecordingFinishedAt"
                 )
                 emitStatus("未找到同步视频，请检查WiFi连接", "#FF0000")

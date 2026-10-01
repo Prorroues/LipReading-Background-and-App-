@@ -4,6 +4,8 @@ import traceback
 import uuid
 from typing import Any
 
+from utils.latest_recognition import attach_plain_text, set_latest
+
 _tasks: dict[str, dict[str, Any]] = {}
 _MAX_TASKS = 200
 
@@ -49,6 +51,7 @@ def mark_done(task_id: str, results: dict[str, Any]) -> None:
     task.update(results)
     task["status"] = "done"
     task["finished_at"] = time.time()
+    attach_plain_text(task)
 
 
 def mark_error(task_id: str, error: str) -> None:
@@ -88,6 +91,8 @@ async def run_pipeline(
 
     if fast:
         await run_vsr()
+        attach_plain_text(results)
+        set_latest(results)
         return results
 
     async with asyncio.TaskGroup() as tg:
@@ -119,6 +124,8 @@ async def run_pipeline(
         tg.create_task(run_vsr())
         tg.create_task(run_lip_video())
 
+    attach_plain_text(results)
+    set_latest(results)
     return results
 
 

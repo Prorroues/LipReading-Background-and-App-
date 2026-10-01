@@ -1,5 +1,9 @@
 package com.rokid.cxrmsamples.ui.home
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -16,6 +21,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.rokid.cxrmsamples.R
+import com.rokid.cxrmsamples.managers.GlobalWifiManager
 
 @Composable
 fun HomeScreen(
@@ -28,9 +34,31 @@ fun HomeScreen(
     val batteryLevel by viewModel.batteryLevel.collectAsState()
     val isCharging by viewModel.isCharging.collectAsState()
     val wifiStatus by viewModel.wifiStatus.collectAsState()
+    val wifiPhase by viewModel.wifiPhase.collectAsState()
+    val wifiHint by viewModel.wifiHint.collectAsState()
     val isConnected by viewModel.isConnected.collectAsState()
     val isWifiEnabled by viewModel.isWifiEnabled.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        viewModel.connectWifiNow()
+    }
+
+    LaunchedEffect(Unit) {
+        val perms = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        permissionLauncher.launch(perms.toTypedArray())
+    }
+
+    val wifiLabel = when (wifiPhase) {
+        GlobalWifiManager.WifiStatus.CONNECTED -> "已连接"
+        GlobalWifiManager.WifiStatus.CONNECTING -> "连接中"
+        GlobalWifiManager.WifiStatus.DISCONNECTED -> "未连接"
+    }
 
     Column(
         modifier = modifier
@@ -68,30 +96,54 @@ fun HomeScreen(
                 containerColor = MaterialTheme.colorScheme.primaryContainer
             )
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "WiFi开关",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "进行唇语、手语识别时务必开启",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "眼镜直连（WiFi 打开，不要开热点、不要连 HaoYu）",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = buildString {
+                                if (!isConnected) append("请先配对眼镜。")
+                                append(
+                                    wifiHint.ifBlank {
+                                        if (wifiStatus) "直连已接通" else "点下方按钮立即连接"
+                                    }
+                                )
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = isWifiEnabled,
+                        onCheckedChange = { viewModel.toggleWifi(it) }
                     )
                 }
-                Switch(
-                    checked = isWifiEnabled,
-                    onCheckedChange = { viewModel.toggleWifi(it) }
-                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        val perms = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            perms.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                        }
+                        permissionLauncher.launch(perms.toTypedArray())
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = wifiPhase != GlobalWifiManager.WifiStatus.CONNECTING
+                ) {
+                    Text(
+                        if (wifiPhase == GlobalWifiManager.WifiStatus.CONNECTING) "正在连接…"
+                        else "立即连接眼镜直连"
+                    )
+                }
             }
         }
 
@@ -159,11 +211,15 @@ fun HomeScreen(
                         Icon(
                             imageVector = Icons.Default.Wifi,
                             contentDescription = null,
-                            tint = if (wifiStatus) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = when (wifiPhase) {
+                                GlobalWifiManager.WifiStatus.CONNECTED -> MaterialTheme.colorScheme.primary
+                                GlobalWifiManager.WifiStatus.CONNECTING -> MaterialTheme.colorScheme.tertiary
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (wifiStatus) "已连接" else "未连接",
+                            text = wifiLabel,
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }

@@ -11,16 +11,17 @@ import com.alibaba.nls.client.protocol.tts.SpeechSynthesizer
 import com.alibaba.nls.client.protocol.tts.SpeechSynthesizerListener
 import com.alibaba.nls.client.protocol.tts.SpeechSynthesizerResponse
 import com.rokid.cxr.client.extend.CxrApi
-import com.rokid.cxr.client.extend.callbacks.SyncStatusCallback
 import com.rokid.cxr.client.utils.ValueUtil
 import com.rokid.cxrmsamples.managers.GlobalCustomViewManager
-import com.rokid.cxrmsamples.managers.GlobalVideoSyncQueue
+import com.rokid.cxrmsamples.managers.GlobalWifiManager
 import com.rokid.cxrmsamples.managers.ErrorReporter
 import com.rokid.cxrmsamples.network.NetworkModule
 import com.rokid.cxrmsamples.network.VideoUploadApi
 import com.rokid.cxrmsamples.network.VideoUploadCoordinator
 import com.rokid.cxrmsamples.utils.AliyunTokenHelper
+import com.rokid.cxrmsamples.utils.GalleryPublisher
 import com.rokid.cxrmsamples.utils.MediaPathProvider
+import com.rokid.cxrmsamples.utils.SyncedVideoFinder
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -104,6 +105,11 @@ class LipReadingManager(private val context: Context) {
             
             startRecording(durationSeconds)
             Log.d(TAG, "⏺️ 录像开始")
+            try {
+                GlobalWifiManager.getInstance().prepareForRecording()
+            } catch (e: Exception) {
+                Log.w(TAG, "预热 WiFi 失败", e)
+            }
             
             // 等待录像完成
             delay((durationSeconds * 1000).toLong() + 500)
@@ -111,11 +117,16 @@ class LipReadingManager(private val context: Context) {
             // 3. 录像结束 - 眼镜提示
             Log.d(TAG, "⏹️ 录像结束")
             val recordEndAt = System.currentTimeMillis()
+            val recordStartAt = recordEndAt - durationSeconds * 1000L
             withContext(Dispatchers.Main) {
                 GlobalCustomViewManager.getInstance().showTextView("录像结束，正在处理...")
             }
             onStatusUpdate("录像结束，正在同步...")
-            delay(1000)
+            try {
+                GlobalWifiManager.getInstance().requestImmediateVideoSync("lip_reading")
+            } catch (e: Exception) {
+                Log.w(TAG, "请求立即同步失败", e)
+            }
             
             // 4. 同步视频 - 眼镜提示
             withContext(Dispatchers.Main) {
@@ -123,8 +134,7 @@ class LipReadingManager(private val context: Context) {
             }
             onStatusUpdate("正在同步视频...")
 
-            // 等待系统同步后的队列更新
-            val videoFile = waitForSyncedVideo(recordEndAt)
+            val videoFile = waitForSyncedVideo(recordStartAt)
             
             if (videoFile == null) {
                 // 同步失败 - 最终失败
@@ -149,6 +159,7 @@ class LipReadingManager(private val context: Context) {
             }
             
             Log.d(TAG, "✓ 视频同步成功: ${videoFile.name}")
+            GalleryPublisher.publishVideo(context, videoFile)
             
             // 5. 上传服务器（带重试，持续显示上传状态）
             onStatusUpdate("正在上传视频...")
@@ -247,23 +258,13 @@ class LipReadingManager(private val context: Context) {
         Log.d(TAG, "开始录像: ${durationSeconds}秒")
     }
     
-    private suspend fun waitForSyncedVideo(recordEndAt: Long): File? {
+    private suspend fun waitForSyncedVideo(recordStartAt: Long): File? {
         return try {
-            val maxWaitTime = 15000L
-            val pollInterval = 500L
-            val startTime = System.currentTimeMillis()
-            
-            while (System.currentTimeMillis() - startTime < maxWaitTime) {
-                val candidatePath = GlobalVideoSyncQueue.getLatestVideoAfter(recordEndAt - 2000)
-                if (candidatePath != null) {
-                    val file = File(candidatePath)
-                    if (file.exists()) {
-                        return file
-                    }
-                }
-                delay(pollInterval)
-            }
-            null
+            SyncedVideoFinder.waitForLatestVideo(
+                context = context,
+                recordedAfterMs = recordStartAt,
+                extraDir = syncPath
+            )
         } catch (e: Exception) {
             Log.e(TAG, "等待同步视频异常", e)
             ErrorReporter.report(

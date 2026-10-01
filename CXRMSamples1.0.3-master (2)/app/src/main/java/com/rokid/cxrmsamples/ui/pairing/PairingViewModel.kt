@@ -109,6 +109,10 @@ class PairingViewModel : ViewModel() {
             _connected.value = true
             _connecting.value = false
             GlobalWifiManager.getInstance().updateDeviceInfo()
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(1200)
+                GlobalWifiManager.getInstance().connectWifi()
+            }
         }
 
         override fun onDisconnected() {

@@ -34,6 +34,8 @@ class AVSRDataLoader:
         if self.modality == "video":
             video = self.load_video(data_filename)
             video = self.video_process(video, landmarks)
+            if video is None:
+                raise Exception("未能裁出嘴部，请把人脸放在画面中间再录")
             video = torch.tensor(video)
             return self.video_transform(video) if self.transform else video
         if self.modality == "audiovisual":
@@ -42,6 +44,8 @@ class AVSRDataLoader:
             audio = self.audio_process(audio, sample_rate)
             video = self.load_video(data_filename)
             video = self.video_process(video, landmarks)
+            if video is None:
+                raise Exception("未能裁出嘴部，请把人脸放在画面中间再录")
             video = torch.tensor(video)
             min_t = min(len(video), audio.size(1) // rate_ratio)
             audio = audio[:, :min_t*rate_ratio]

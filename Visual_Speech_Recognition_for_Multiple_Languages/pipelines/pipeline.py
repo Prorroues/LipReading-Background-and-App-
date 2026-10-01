@@ -40,9 +40,16 @@ class InferencePipeline(torch.nn.Module):
         ctc_weight = config.getfloat("decode", "ctc_weight")
         lm_weight = config.getfloat("decode", "lm_weight")
         beam_size = config.getint("decode", "beam_size")
+        maxlenratio = config.getfloat("decode", "maxlenratio", fallback=-8.0)
+        if lm_weight <= 0:
+            rnnlm = None
 
         self.dataloader = AVSRDataLoader(modality, speed_rate=input_v_fps/model_v_fps, detector=detector)
-        self.model = AVSR(modality, model_path, model_conf, rnnlm, rnnlm_conf, penalty, ctc_weight, lm_weight, beam_size, device)
+        self.model = AVSR(
+            modality, model_path, model_conf, rnnlm, rnnlm_conf,
+            penalty, ctc_weight, lm_weight, beam_size, device,
+            maxlenratio=maxlenratio,
+        )
         if face_track and self.modality in ["video", "audiovisual"]:
             if detector == "mediapipe":
                 from .detectors.mediapipe.detector import LandmarksDetector

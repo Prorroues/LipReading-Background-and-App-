@@ -156,6 +156,10 @@ class VoiceServiceViewModel(application: Application) : AndroidViewModel(applica
             }
         }
 
+        override fun onP2pDeviceAvailable(name: String?, address: String?, info: String?) {
+            Log.d(TAG, "WiFi P2P device available: $name $address")
+        }
+
         override fun onFailed(errorCode: ValueUtil.CxrWifiErrorCode?) {
             Log.e(TAG, "WiFi P2P connection failed: $errorCode")
             CoroutineScope(Dispatchers.Main).launch {
@@ -409,11 +413,11 @@ class VoiceServiceViewModel(application: Application) : AndroidViewModel(applica
                 recordName = "voice_${System.currentTimeMillis()}.pcm"
                 Log.d(TAG, "准备开始录音: $recordName")
                 audioListener = object : AudioStreamListener {
-                    override fun onStartAudioStream(codeType: Int, streamType: String?) {
-                        Log.d(TAG, "Audio stream started, codeType: $codeType, streamType: $streamType")
+                    override fun onStartAudioStream(streamId: Int, codec: Int, mode: Int, cmd: String?) {
+                        Log.d(TAG, "Audio stream started, streamId=$streamId codec=$codec cmd=$cmd")
                     }
 
-                    override fun onAudioStream(data: ByteArray?, offset: Int, size: Int) {
+                    override fun onAudioStream(streamId: Int, data: ByteArray?, offset: Int, size: Int) {
                         Log.v(TAG, "收到音频数据: size=$size, offset=$offset, dataLength=${data?.size}")
                         // 保存音频数据
                         val file = File(recordPath, recordName)
@@ -447,12 +451,15 @@ class VoiceServiceViewModel(application: Application) : AndroidViewModel(applica
                             }
                         }
                     }
+                    override fun onAudioStreamFinish(streamId: Int) {
+                        Log.d(TAG, "Audio stream finished: $streamId")
+                    }
                 }
 
                 CxrApi.getInstance().setAudioStreamListener(audioListener)
                 Log.d(TAG, "设置音频监听器成功")
                 
-                CxrApi.getInstance().openAudioRecord(1, "voice_recognition")
+                CxrApi.getInstance().openAudioRecord(1, 0, "voice_recognition")
                 Log.d(TAG, "打开音频录制成功")
 
             } catch (e: Exception) {
