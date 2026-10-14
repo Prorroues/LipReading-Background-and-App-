@@ -1,15 +1,12 @@
-"""Closed-vocab home commands scored by visual CTC.
+"""UNUSED backup (2026-10-14). Live infer() is CMLR news beam search only.
 
-Always pick from ACTIVE_COMMANDS. Do not emit greedy/news text.
+Overlap-gated home CTC decoder. Do not import from model.py.
 
-Scoring notes:
-- Do NOT divide CTC NLL by sqrt(len). When the mouth is unclear, that
-  formula always prefers the longest phrase, which is 开/关床下前灯.
-  That is why 「打开风扇」 kept coming back as 床下前灯, and why 开/关
-  flipped between trials (those two visemes are almost the same).
-- Pick the device first, then open vs close on same-length pairs
-  (打开风扇 vs 关闭风扇). Do not score 开风扇/关风扇; the shorter
-  关风扇 always beats 打开风扇 and then gets rewritten as 关闭风扇.
+Scoring (not in use):
+  score = raw_nll / sqrt(len) - 3.0 * overlap_hits
+  accept if best_nll <= MAX_NLL(40.0) and margin >= MIN_MARGIN(0.3)
+Home vocab FAN_ON/OFF + LIGHT_ON/OFF + SCENE is kept here as backup only.
+Closed-vocab snapshot: command_decode_closedvocab.py
 """
 
 from __future__ import annotations
@@ -22,71 +19,36 @@ import torch.nn.functional as F
 
 logger = logging.getLogger("command_decode")
 
-FAN_ON = ("打开风扇",)
-FAN_OFF = ("关闭风扇",)
+FAN_ON = ("开风扇", "打开风扇", "开启风扇", "启动风扇")
+FAN_OFF = ("关风扇", "关闭风扇", "关掉风扇", "停止风扇", "停风扇")
 LIGHT_ON = (
-    "开厕所灯",
+    "开氛围灯",
+    "开柜子灯",
+    "开床头灯",
     "开床后灯",
-    "开床下前灯",
     "开床下灯",
     "开上左灯",
+    "开厕所灯",
 )
 LIGHT_OFF = (
-    "关厕所灯",
+    "关氛围灯",
+    "关柜子灯",
+    "关床头灯",
     "关床后灯",
-    "关床下前灯",
     "关床下灯",
     "关上左灯",
+    "关厕所灯",
 )
-ACTIVE_COMMANDS: tuple[str, ...] = FAN_ON + FAN_OFF + LIGHT_ON + LIGHT_OFF
-
-DEVICE_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("风扇", FAN_ON + FAN_OFF),
-    ("厕所灯", ("开厕所灯", "关厕所灯")),
-    ("床后灯", ("开床后灯", "关床后灯")),
-    ("床下前灯", ("开床下前灯", "开床下灯", "关床下前灯", "关床下灯")),
-    ("上左灯", ("开上左灯", "关上左灯")),
-)
-
-CANONICAL = {
-    "开风扇": "打开风扇",
-    "打开风扇": "打开风扇",
-    "开启风扇": "打开风扇",
-    "启动风扇": "打开风扇",
-    "关风扇": "关闭风扇",
-    "关闭风扇": "关闭风扇",
-    "关掉风扇": "关闭风扇",
-    "停止风扇": "关闭风扇",
-    "停风扇": "关闭风扇",
-    "开厕所灯": "打开厕所灯",
-    "关厕所灯": "关闭厕所灯",
-    "开床后灯": "打开床后灯",
-    "关床后灯": "关闭床后灯",
-    "开床下灯": "打开床下前灯",
-    "开床下前灯": "打开床下前灯",
-    "关床下灯": "关闭床下前灯",
-    "关床下前灯": "关闭床下前灯",
-    "开上左灯": "打开上左灯",
-    "关上左灯": "关闭上左灯",
-}
+SCENE = ("我回来了", "我出门了")
+HOME_COMMANDS: tuple[str, ...] = FAN_ON + FAN_OFF + LIGHT_ON + LIGHT_OFF + SCENE
 
 BLANK_ID = 0
-OPEN_HINTS = ("打", "启")
-CLOSE_HINTS = ("关", "停", "闭")
-ACTION_PAIRS: tuple[tuple[str, str], ...] = (
-    ("打开风扇", "关闭风扇"),
-    ("开厕所灯", "关厕所灯"),
-    ("开床后灯", "关床后灯"),
-    ("开床下前灯", "关床下前灯"),
-    ("开上左灯", "关上左灯"),
-)
-DEVICE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("风扇", ("风", "扇")),
-    ("厕所灯", ("厕",)),
-    ("床后灯", ("后",)),
-    ("床下前灯", ("下", "前")),
-    ("上左灯", ("左",)),
-)
+MAX_NLL = 40.0
+MIN_MARGIN = 0.3
+FAN_HINTS = ("风", "扇")
+LIGHT_HINTS = ("灯", "光")
+OPEN_HINTS = ("开", "打", "启")
+CLOSE_HINTS = ("关", "停")
 
 
 def _char_ids(phrase: str, token_list: list[str]) -> list[int] | None:
@@ -120,23 +82,26 @@ def ctc_greedy_text(logp: torch.Tensor, token_list: list[str]) -> str:
     return "".join(chars)
 
 
+def _overlap_bonus(phrase: str, greedy: str) -> float:
+    if not greedy:
+        return 0.0
+    hits = sum(1 for ch in phrase if ch in greedy)
+    return float(hits)
+
+
 def score_commands(
     enc_feats: torch.Tensor,
     ctc_module,
     token_list: list[str],
     greedy: str,
-    commands: Iterable[str] = ACTIVE_COMMANDS,
+    commands: Iterable[str] = HOME_COMMANDS,
 ) -> list[tuple[float, str, float]]:
-    """Return (score, phrase, raw_nll) sorted ascending. Lower is better."""
     if enc_feats.dim() != 2:
         raise ValueError(f"expected encoder (T, D), got {tuple(enc_feats.shape)}")
     logp = ctc_module.log_softmax(enc_feats.unsqueeze(0))
     tlen = logp.size(1)
     logp_t = logp.permute(1, 0, 2).float().cpu()
     scored: list[tuple[float, str, float]] = []
-    distinctive = set()
-    for _, hints in DEVICE_HINTS:
-        distinctive.update(hints)
     for phrase in commands:
         ids = _char_ids(phrase, token_list)
         if not ids:
@@ -152,59 +117,41 @@ def score_commands(
             zero_infinity=True,
         )
         raw = float(loss.item())
-        hits = sum(1 for ch in phrase if ch in greedy and ch in distinctive) if greedy else 0
-        action_hits = 0
-        if greedy and 1 <= len(greedy) <= 6:
-            is_off = phrase in FAN_OFF or phrase in LIGHT_OFF
-            is_on = phrase in FAN_ON or phrase in LIGHT_ON
-            if is_off and any(ch in greedy for ch in CLOSE_HINTS):
-                action_hits += 1
-            if is_on and any(ch in greedy for ch in OPEN_HINTS):
-                action_hits += 1
-        score = raw - 8.0 * hits - 8.0 * action_hits
+        hits = _overlap_bonus(phrase, greedy)
+        score = raw / (len(ids) ** 0.5) - 3.0 * hits
         scored.append((score, phrase, raw))
     scored.sort(key=lambda x: x[0])
     return scored
 
 
-def _hinted_device(greedy: str) -> str | None:
+def _enough_overlap(phrase: str, greedy: str) -> bool:
     if not greedy:
-        return None
-    hits = [
-        name
-        for name, chars in DEVICE_HINTS
-        if any(ch in greedy for ch in chars)
-    ]
-    if len(hits) == 1:
-        return hits[0]
-    return None
+        return False
+    hits = sum(1 for ch in phrase if ch in greedy)
+    if any(h in phrase and h in greedy for h in FAN_HINTS + LIGHT_HINTS):
+        return hits >= 1
+    return hits >= 2
 
 
-def _pick_open_close(
-    greedy: str,
-    rows: list[tuple[float, str, float]],
-) -> tuple[float, str, float]:
-    by_phrase = {row[1]: row for row in rows}
-    choices: list[tuple[float, str, float]] = []
-    for on_p, off_p in ACTION_PAIRS:
-        on_row = by_phrase.get(on_p)
-        off_row = by_phrase.get(off_p)
-        if on_row is None or off_row is None:
-            continue
-        # 开/关口型太像，关闭必须明显更像才算关，否则保持打开。
-        need = 2.5
-        has_close = bool(greedy) and 1 <= len(greedy) <= 6 and any(
-            ch in greedy for ch in CLOSE_HINTS
-        )
-        has_open = bool(greedy) and any(ch in greedy for ch in OPEN_HINTS)
-        if off_row[0] + need < on_row[0] or (has_close and not has_open and off_row[0] <= on_row[0]):
-            choices.append(off_row)
-        else:
-            choices.append(on_row)
-    if choices:
-        choices.sort(key=lambda x: x[0])
-        return choices[0]
-    return rows[0]
+def _restrict(greedy: str, ranked: list[tuple[float, str, float]]) -> list[tuple[float, str, float]]:
+    ranked = [row for row in ranked if _enough_overlap(row[1], greedy)]
+    if any(ch in greedy for ch in FAN_HINTS):
+        fan = [row for row in ranked if row[1] in FAN_ON + FAN_OFF]
+        if fan:
+            ranked = fan
+    elif any(ch in greedy for ch in LIGHT_HINTS):
+        lights = [row for row in ranked if row[1] in LIGHT_ON + LIGHT_OFF]
+        if lights:
+            ranked = lights
+    if any(ch in greedy for ch in OPEN_HINTS) and not any(ch in greedy for ch in CLOSE_HINTS):
+        opened = [row for row in ranked if row[1] in FAN_ON + LIGHT_ON]
+        if opened:
+            ranked = opened
+    if any(ch in greedy for ch in CLOSE_HINTS):
+        closed = [row for row in ranked if row[1] in FAN_OFF + LIGHT_OFF]
+        if closed:
+            ranked = closed
+    return ranked
 
 
 def pick_command(
@@ -214,38 +161,31 @@ def pick_command(
 ) -> tuple[str | None, str, list[tuple[float, str]]]:
     logp = ctc_module.log_softmax(enc_feats.unsqueeze(0)).squeeze(0)
     greedy = ctc_greedy_text(logp, token_list)
-    ranked = score_commands(enc_feats, ctc_module, token_list, greedy, ACTIVE_COMMANDS)
-    if not ranked:
-        logger.info("CTC greedy=%r empty candidate table", greedy)
+    news_markers = ("习近平", "习近", "总书记", "新闻联播", "人民日报")
+    if any(w in greedy for w in news_markers) or (
+        greedy.count("的") >= 3 and len(set(greedy)) <= 4
+    ):
+        logger.info("greedy looks like news/garbage, skip command pick: %r", greedy)
         return None, greedy, []
 
-    by_device: list[tuple[float, str, list[tuple[float, str, float]]]] = []
-    for name, phrases in DEVICE_GROUPS:
-        rows = [row for row in ranked if row[1] in phrases]
-        if rows:
-            by_device.append((rows[0][0], name, rows))
-    by_device.sort(key=lambda x: x[0])
+    ranked_full = score_commands(enc_feats, ctc_module, token_list, greedy)
+    ranked = _restrict(greedy, ranked_full)
+    if not ranked:
+        logger.info("CTC greedy=%r no overlapping command", greedy)
+        return None, greedy, []
 
-    hinted = _hinted_device(greedy)
-    if hinted and len(greedy) <= 8:
-        hinted_item = next((item for item in by_device if item[1] == hinted), None)
-        top_score = by_device[0][0]
-        if hinted_item is not None and hinted_item[0] <= top_score + max(6.0, 0.08 * abs(top_score)):
-            by_device = [hinted_item] + [item for item in by_device if item[1] != hinted]
-
-    device_score, device_name, rows = by_device[0]
-    second = by_device[1][0] if len(by_device) > 1 else device_score + 1.0
-    best = _pick_open_close(greedy, rows)
-    phrase = CANONICAL.get(best[1], best[1])
+    best_score, best, best_nll = ranked[0]
+    second_score = ranked[1][0] if len(ranked) > 1 else best_score + 1.0
+    margin = second_score - best_score
     logger.info(
-        "closed-vocab greedy=%r device=%s best=%s raw=%.3f score=%.3f "
-        "device_margin=%.3f top3=%s",
+        "CTC greedy=%r best=%s nll=%.3f score=%.3f margin=%.3f top3=%s",
         greedy,
-        device_name,
-        phrase,
-        best[2],
-        best[0],
-        second - device_score,
-        [(round(s, 2), CANONICAL.get(p, p)) for s, p, _ in ranked[:3]],
+        best,
+        best_nll,
+        best_score,
+        margin,
+        [(round(s, 2), p) for s, p, _ in ranked[:3]],
     )
-    return phrase, greedy, [(s, CANONICAL.get(p, p)) for s, p, _ in ranked]
+    if best_nll <= MAX_NLL and margin >= MIN_MARGIN:
+        return best, greedy, [(s, p) for s, p, _ in ranked]
+    return None, greedy, [(s, p) for s, p, _ in ranked]

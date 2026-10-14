@@ -1,7 +1,7 @@
-"""Backup of the overlap-gated decoder (2026-09-28).
+"""UNUSED backup of overlap-gated decoder (2026-09-28 snapshot).
 
-Restore by copying this file over command_decode.py if we need greedy/news
-fallback again. The live decoder now always emits a closed-vocab command.
+Live infer() is CMLR news beam search only. Do not import from model.py.
+Scoring (not in use): nll/sqrt(len) - 3.0*hits; MAX_NLL=40; MIN_MARGIN=0.3
 """
 
 from __future__ import annotations
